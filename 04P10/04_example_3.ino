@@ -3,22 +3,22 @@ unsigned int count, toggle;
 
 void setup() {
   pinMode(PIN_LED, OUTPUT);
-  Serial.begin(115200); //Initialize serial port
+  Serial.begin(115200);
   while (!Serial) {
-    ; //wait for serial port to connect.
+    ;
   }
   Serial.println("Hello World!");
   count = toggle = 0;
-  digitalWrite(PIN_LED, toggle); //turn off LED.
+  digitalWrite(PIN_LED, toggle);
 }
 
 void loop() {
   Serial.println(++count);
-  toggle = toggle_state(toggle); //toggle LED value.
-  digitalWrite(PIN_LED, toggle); //update LED status.
-  delay(1000); //wait for 1,000 milliseconds
+  toggle = toggle_state(toggle);
+  digitalWrite(PIN_LED, toggle);
+  delay(1000);
 }
 
 int toggle_state(int toggle){
-  return !toggle;
+  return 1 - toggle;
 }
