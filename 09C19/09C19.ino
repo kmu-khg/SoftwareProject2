@@ -1,96 +1,112 @@
-#include <Servo.h>
-#include <math.h>
-
-// --- 핀 설정 ---
-#define PIN_SERVO 10
+#define PIN_LED  9
 #define PIN_TRIG 12
 #define PIN_ECHO 13
 
-// --- 상수 ---
-#define SOUND_VELOCITY 346.0   // m/s
-#define INTERVAL 25            // 주기 (ms)
+#define SND_VEL 346.0
+#define INTERVAL 25
 #define PULSE_DURATION 10
-#define DIST_THRESHOLD 15.0    // 차량 감지 거리(cm)
-#define SERVO_UP_ANGLE 90      // 차단기 열림 각도
-#define SERVO_DOWN_ANGLE 0     // 차단기 닫힘 각도
+#define _DIST_MIN 100
+#define _DIST_MAX 300
 
-Servo servo;
-unsigned long last_sampling_time = 0;
+#define TIMEOUT ((INTERVAL / 2) * 1000.0)
+#define SCALE (0.001 * 0.5 * SND_VEL)
 
-// --- 함수 선택 (0: sigmoid / 1: sin) ---
-int controlMode = 0;
+#define _EMA_ALPHA 0.5
 
-// --- 초음파 거리 측정 함수 ---
-float getDistance() {
-  digitalWrite(PIN_TRIG, LOW);
-  delayMicroseconds(2);
-  digitalWrite(PIN_TRIG, HIGH);
-  delayMicroseconds(PULSE_DURATION);
-  digitalWrite(PIN_TRIG, LOW);
+#define MEDIAN_SIZE 10
 
-  unsigned long duration = pulseIn(PIN_ECHO, HIGH, 30000); // 30ms timeout
-  float distance = duration * 0.000001 * (SOUND_VELOCITY / 2.0) * 100.0; // cm
-  return distance;
+unsigned long last_sampling_time;
+float dist_prev = _DIST_MAX;
+float dist_ema;
+
+float median_arr[MEDIAN_SIZE];  
+int   median_idx = 0;    
+int   median_count = 0;    
+
+void median_add(float x) {
+  median_arr[median_idx] = x;
+  median_idx = (median_idx + 1) % MEDIAN_SIZE;
+  if (median_count < MEDIAN_SIZE) median_count++;
 }
 
-// --- 시그모이드 함수 기반 서보 제어 ---
-void moveServoSigmoid(int startAngle, int endAngle) {
-  float step = 0.1;
-  float a = 6.0;  // 시그모이드 기울기
-  for (float t = 0.0; t <= 1.0; t += step) {
-    float sigmoid = 1.0 / (1.0 + exp(-a * (t - 0.5)));
-    int angle = startAngle + (endAngle - startAngle) * sigmoid;
-    servo.write(angle);
-    delay(25);
+float median_get() {
+  if (median_count == 0) return 0.0;
+
+  float sorted_arr[MEDIAN_SIZE];
+  for (int i = 0; i < median_count; i++) {
+    sorted_arr[i] = median_arr[i];
+  }
+
+  for (int i = 0; i < median_count - 1; i++) {
+    for (int j = 0; j < median_count - i - 1; j++) {
+      if (sorted_arr[j] > sorted_arr[j + 1]) {
+        float a = sorted_arr[j];
+        sorted_arr[j] = sorted_arr[j + 1];
+        sorted_arr[j + 1] = a;
+      }
+    }
+  }
+
+  int mid = median_count / 2;
+  if (median_count % 2 == 1) {
+    return sorted_arr[mid];
+  } else {
+    return (sorted_arr[mid - 1] + sorted_arr[mid]) / 2.0;
   }
 }
 
-// --- 삼각함수 기반 서보 제어 ---
-void moveServoSin(int startAngle, int endAngle) {
-  float step = 0.05;
-  for (float t = 0.0; t <= 1.0; t += step) {
-    float smooth = (sin(PI * t - PI / 2) + 1.0) / 2.0;  // 0~1 부드러운 곡선
-    int angle = startAngle + (endAngle - startAngle) * smooth;
-    servo.write(angle);
-    delay(25);
-  }
-}
-
-// --- setup ---
 void setup() {
-  Serial.begin(9600);
-  servo.attach(PIN_SERVO);
-  pinMode(PIN_TRIG, OUTPUT);
-  pinMode(PIN_ECHO, INPUT);
-  servo.write(SERVO_DOWN_ANGLE);
-  Serial.println("Parking Gate System Ready!");
-  Serial.println("Control Mode: 0=Sigmoid, 1=Sin");
+  pinMode(PIN_LED,OUTPUT);
+  pinMode(PIN_TRIG,OUTPUT);
+  pinMode(PIN_ECHO,INPUT);
+  digitalWrite(PIN_TRIG, LOW);
+
+  Serial.begin(57600);
+
+
 }
 
-// --- loop ---
 void loop() {
-  float distance = getDistance();
-  Serial.print("Distance: ");
-  Serial.println(distance);
+  float dist_raw, dist_filtered, dist_median;
 
-  // 모드 전환 (시리얼 입력으로 변경 가능)
-  if (Serial.available()) {
-    char ch = Serial.read();
-    if (ch == '0') controlMode = 0;
-    else if (ch == '1') controlMode = 1;
+  if (millis() < last_sampling_time + INTERVAL)
+    return;
+
+  dist_raw = USS_measure(PIN_TRIG,PIN_ECHO);
+
+  if ((dist_raw < _DIST_MIN) || (dist_raw > _DIST_MAX)) {
+      dist_filtered = dist_prev;
+  } else {
+      dist_filtered = dist_raw;
+      dist_prev = dist_raw;
   }
 
-  if (distance < DIST_THRESHOLD) {
-    Serial.println("Car detected! Opening gate...");
-    if (controlMode == 0) moveServoSigmoid(SERVO_DOWN_ANGLE, SERVO_UP_ANGLE);
-    else moveServoSin(SERVO_DOWN_ANGLE, SERVO_UP_ANGLE);
-    delay(2000);
-  } 
-  else {
-    Serial.println("No car detected. Closing gate...");
-    if (controlMode == 0) moveServoSigmoid(SERVO_UP_ANGLE, SERVO_DOWN_ANGLE);
-    else moveServoSin(SERVO_UP_ANGLE, SERVO_DOWN_ANGLE);
-  }
+  median_add(dist_raw);
+  dist_median = median_get();
 
-  delay(500);
+  dist_ema = (_EMA_ALPHA * dist_filtered) + ((1 - _EMA_ALPHA) * dist_ema);
+
+  Serial.print("Min:");     Serial.print(_DIST_MIN);
+  Serial.print(",raw:");    Serial.print(dist_raw);
+  Serial.print(",ema:");    Serial.print(dist_ema);
+  Serial.print(",median:"); Serial.print(dist_median);
+  Serial.print(",Max:");    Serial.print(_DIST_MAX);
+  Serial.println("");
+
+
+  if ((dist_raw < _DIST_MIN) || (dist_raw > _DIST_MAX))
+    digitalWrite(PIN_LED, 1);
+  else
+    digitalWrite(PIN_LED, 0);
+
+  last_sampling_time += INTERVAL;
+}
+
+float USS_measure(int TRIG, int ECHO)
+{
+  digitalWrite(TRIG, HIGH);
+  delayMicroseconds(PULSE_DURATION);
+  digitalWrite(TRIG, LOW);
+  
+  return pulseIn(ECHO, HIGH, TIMEOUT) * SCALE;
 }
